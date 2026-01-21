@@ -836,54 +836,68 @@ class AutoLogin:
     
     def wait_redirect(self, page, wait=60):
         """
-        等待重定向（最终暴力版）
-        逻辑：只要页面上还有 "GitHub" 按钮，就说明没进去，继续点！
+        等待重定向（严格版）
+        逻辑：只要页面上有 "GitHub" 按钮或 "Welcome" 字样，就是没登录，必须点！
         """
         self.log("等待重定向...", "STEP")
         
         for i in range(wait):
+            # ==========================================
+            # 1. 优先处理：如果你在门口，就赶紧进门
+            # ==========================================
             try:
-                # =================================================
-                # 核心修正：主动寻找页面上的 GitHub 登录按钮
-                # =================================================
-                # 查找常见的 GitHub 登录按钮元素
-                btn = page.locator('button:has-text("GitHub"), [data-provider="github"], a:has-text("GitHub")').first
+                # 查找 GitHub 登录按钮
+                login_btn = page.locator('button:has-text("GitHub"), [data-provider="github"]').first
                 
-                # 如果按钮存在且可见，说明还在登录页！
-                if btn.is_visible(timeout=500):
-                    # 只有在第 3 秒以后才开始重试（给它一点自动跳转的时间）
-                    if i > 3:
-                        self.log(f"检测到未登录（发现 GitHub 按钮），第 {i} 秒尝试点击...", "WARN")
-                        btn.click()
-                        # 点完等几秒让它反应
-                        time.sleep(4)
+                # 如果按钮可见，说明未登录！
+                if login_btn.is_visible(timeout=500):
+                    # 避免刚跳转还没反应过来就狂点，稍微给点缓冲
+                    if i > 2:
+                        self.log(f"检测到登录按钮，尝试点击... ({i})", "WARN")
+                        login_btn.click()
+                        time.sleep(4) # 给它时间跳转
                         page.wait_for_load_state('networkidle', timeout=5000)
-                        continue # 点完直接进入下一轮循环，重新判断
+                        continue # 点完直接下一轮，不往下判断成功
             except:
                 pass
 
-            # 获取当前 URL
+            # ==========================================
+            # 2. 判断成功（逻辑大改）
+            # ==========================================
             url = page.url
             
-            # 1. 成功判断（加强版）
-            # 必须包含 claw.cloud，且不能是 signin，且页面上不能有 GitHub 按钮（上面已经处理）
+            # 只有当：
+            # 1. 域名包含 claw.cloud
+            # 2. URL 不含 signin
+            # 3. 页面上【没有】登录按钮（双重保险）
+            # 才算成功
             if 'claw.cloud' in url and 'signin' not in url.lower():
-                # 再做一个双重检查：确保不是首页 Landing Page
-                # 如果 URL 只是 https://xxx.claw.cloud/ 且页面标题包含 Welcome，那也是失败
-                title = page.title()
-                if "Welcome" in title and i < wait - 5:
-                    # 如果是 Welcome 页面，下一轮循环会被上面的按钮检测捕获并点击
+                # 二次确认：如果你还在首页 (URL以 .cloud 或 / 结尾)，检查是否有 Welcome 字样
+                is_landing_page = (url.endswith('.cloud') or url.endswith('.cloud/'))
+                has_welcome = False
+                try:
+                    if is_landing_page:
+                        if page.get_by_text("Welcome to ClawCloud").count() > 0:
+                            has_welcome = True
+                except:
                     pass
+                
+                if is_landing_page and has_welcome:
+                    # 这是首页，不是控制台！不要 return True，继续循环去点按钮
+                    pass 
                 else:
-                    self.log("重定向成功！(进入内部页面)", "SUCCESS")
+                    self.log("重定向成功！(已进入控制台)", "SUCCESS")
                     self.detect_region(url)
                     return True
-            
-            # 2. 还在 OAuth 授权页
+
+            # ==========================================
+            # 3. 处理其他中间状态
+            # ==========================================
+            # OAuth 授权
             if 'github.com/login/oauth/authorize' in url:
                 self.oauth(page)
 
-            # 3. Sudo 密码确认页
+            # Sudo 密码确认
             if 'github.com/sessions/sudo' in url:
                 try:
                     page.locator('input[type="password"]').fill(self.password)
@@ -895,7 +909,7 @@ class AutoLogin:
             if i % 5 == 0:
                 self.log(f"  等待跳转... ({i}/{wait}秒)")
         
-        self.log("重定向超时 - 始终无法进入控制台", "ERROR")
+        self.log("重定向超时 - 始终无法进入内部页面", "ERROR")
         return False
     
     def keepalive(self, page):

@@ -836,68 +836,89 @@ class AutoLogin:
     
     def wait_redirect(self, page, wait=60):
         """
-        等待重定向（严格版）
-        逻辑：只要页面上有 "GitHub" 按钮或 "Welcome" 字样，就是没登录，必须点！
+        等待重定向（视觉判断版）
+        不看 URL，只看页面元素。没看到头像/菜单就认为没登录。
         """
-        self.log("等待重定向...", "STEP")
+        self.log("等待重定向(视觉判断)...", "STEP")
         
+        # 1. 强制跳转策略：直接尝试去 /apps 页面
+        # 如果已登录，会留在 /apps；如果未登录，会被踢回 signin 页面，方便我们识别
+        try:
+            current_url = page.url
+            if 'claw.cloud' in current_url and 'signin' not in current_url:
+                # 拼接 apps 路径，例如 https://us-east-1.run.claw.cloud/apps
+                # 只有当 URL 不含 apps 时才跳转，避免死循环刷新
+                if '/apps' not in current_url:
+                    base = current_url.split('?')[0].rstrip('/')
+                    target = f"{base}/apps"
+                    self.log(f"尝试主动访问: {target}", "INFO")
+                    page.goto(target, timeout=10000)
+                    page.wait_for_load_state('networkidle', timeout=5000)
+        except:
+            pass
+
         for i in range(wait):
-            # ==========================================
-            # 1. 优先处理：如果你在门口，就赶紧进门
-            # ==========================================
+            # ==================================================
+            # 判据 A：我是不是成功了？
+            # 只有页面里出现了 "头像"、"Logout"、"Apps" 等元素才算赢
+            # ==================================================
             try:
-                # 查找 GitHub 登录按钮
-                login_btn = page.locator('button:has-text("GitHub"), [data-provider="github"]').first
+                # 查找只有登录后才有的元素
+                # 1. 头像 (通常是 img 标签，或者特定 class)
+                # 2. 侧边栏的 "Apps" 链接
+                success_indicators = [
+                    'a[href*="/apps"]',           # 应用链接
+                    'button[aria-label="Account"]', # 账户菜单
+                    'text="Create New App"',      # 创建按钮
+                    '.avatar',                    # 头像类名
+                ]
                 
-                # 如果按钮可见，说明未登录！
-                if login_btn.is_visible(timeout=500):
-                    # 避免刚跳转还没反应过来就狂点，稍微给点缓冲
-                    if i > 2:
-                        self.log(f"检测到登录按钮，尝试点击... ({i})", "WARN")
-                        login_btn.click()
-                        time.sleep(4) # 给它时间跳转
-                        page.wait_for_load_state('networkidle', timeout=5000)
-                        continue # 点完直接下一轮，不往下判断成功
+                for selector in success_indicators:
+                    if page.locator(selector).first.is_visible(timeout=200):
+                        self.log(f"检测到登录成功元素: {selector}", "SUCCESS")
+                        self.detect_region(page.url)
+                        return True
             except:
                 pass
 
-            # ==========================================
-            # 2. 判断成功（逻辑大改）
-            # ==========================================
-            url = page.url
-            
-            # 只有当：
-            # 1. 域名包含 claw.cloud
-            # 2. URL 不含 signin
-            # 3. 页面上【没有】登录按钮（双重保险）
-            # 才算成功
-            if 'claw.cloud' in url and 'signin' not in url.lower():
-                # 二次确认：如果你还在首页 (URL以 .cloud 或 / 结尾)，检查是否有 Welcome 字样
-                is_landing_page = (url.endswith('.cloud') or url.endswith('.cloud/'))
-                has_welcome = False
-                try:
-                    if is_landing_page:
-                        if page.get_by_text("Welcome to ClawCloud").count() > 0:
-                            has_welcome = True
-                except:
-                    pass
+            # ==================================================
+            # 判据 B：我是不是还在登录页？
+            # 如果看到了 GitHub 按钮，直接点！
+            # ==================================================
+            try:
+                # 各种可能的登录按钮选择器
+                login_btns = [
+                    'button:has-text("GitHub")',
+                    '[data-provider="github"]',
+                    'a:has-text("Sign in with GitHub")'
+                ]
                 
-                if is_landing_page and has_welcome:
-                    # 这是首页，不是控制台！不要 return True，继续循环去点按钮
-                    pass 
-                else:
-                    self.log("重定向成功！(已进入控制台)", "SUCCESS")
-                    self.detect_region(url)
-                    return True
+                for btn_sel in login_btns:
+                    btn = page.locator(btn_sel).first
+                    if btn.is_visible(timeout=200):
+                        # 只有 i > 2 才点击，防止页面刚加载时的误触
+                        if i > 2:
+                            self.log(f"视觉检测到登录按钮({btn_sel})，点击重试...", "WARN")
+                            # 强制点击
+                            btn.click(force=True)
+                            
+                            # 点击后等待
+                            time.sleep(5)
+                            page.wait_for_load_state('networkidle', timeout=10000)
+                            
+                            # 点完直接进入下一轮循环检查，不再往下走
+                            break 
+            except:
+                pass
 
-            # ==========================================
-            # 3. 处理其他中间状态
-            # ==========================================
-            # OAuth 授权
+            # ==================================================
+            # 判据 C：处理中间状态
+            # ==================================================
+            url = page.url
             if 'github.com/login/oauth/authorize' in url:
                 self.oauth(page)
-
-            # Sudo 密码确认
+            
+            # Sudo 模式
             if 'github.com/sessions/sudo' in url:
                 try:
                     page.locator('input[type="password"]').fill(self.password)
@@ -907,9 +928,9 @@ class AutoLogin:
 
             time.sleep(1)
             if i % 5 == 0:
-                self.log(f"  等待跳转... ({i}/{wait}秒)")
+                self.log(f"  等待验证结果... ({i}/{wait}秒)")
         
-        self.log("重定向超时 - 始终无法进入内部页面", "ERROR")
+        self.log("重定向超时 - 未检测到登录后特征", "ERROR")
         return False
     
     def keepalive(self, page):

@@ -835,26 +835,56 @@ class AutoLogin:
             page.wait_for_load_state('networkidle', timeout=30000)
     
     def wait_redirect(self, page, wait=60):
-        """等待重定向并检测区域"""
+        """等待重定向（智能版：支持回弹重试）"""
         self.log("等待重定向...", "STEP")
+        
+        # 记录是否已经尝试过重试点击，避免死循环狂点
+        retried_click = False
+        
         for i in range(wait):
             url = page.url
             
-            # 检查是否已跳转到 claw.cloud
+            # 1. 成功：进入了控制台 (URL包含 claw.cloud 且不包含 signin)
             if 'claw.cloud' in url and 'signin' not in url.lower():
                 self.log("重定向成功！", "SUCCESS")
-                
-                # 检测并记录区域
                 self.detect_region(url)
-                
                 return True
             
+            # 2. 特殊情况：卡在 OAuth 授权页 -> 点授权
             if 'github.com/login/oauth/authorize' in url:
                 self.oauth(page)
             
+            # 3. 【核心修复】特殊情况：验证完被踢回了登录页 (signin) -> 再点一次 GitHub
+            if 'signin' in url.lower() and 'claw.cloud' in url:
+                # 为了防止页面刚加载还没跳转就误判，我们只在第 5 秒后开始检测这个情况
+                if i > 5: 
+                    self.log("检测到回弹至登录页，尝试再次点击 GitHub...", "WARN")
+                    
+                    # 尝试点击 GitHub 按钮
+                    clicked = self.click(page, [
+                        '[data-provider="github"]',
+                        'button:has-text("GitHub")',
+                        'a:has-text("GitHub")'
+                    ], "再次点击 GitHub")
+                    
+                    if clicked:
+                        # 点完等几秒让它跳转，重置 i 不是好主意，直接 sleep
+                        time.sleep(5)
+                        page.wait_for_load_state('networkidle', timeout=10000)
+            
+            # 4. 特殊情况：Sudo Mode (再次输密码)
+            if 'github.com/sessions/sudo' in url:
+                self.log("检测到 Sudo 密码确认页", "WARN")
+                try:
+                    page.locator('input[type="password"]').fill(self.password)
+                    page.locator('button[type="submit"]').click()
+                    time.sleep(3)
+                except:
+                    pass
+
             time.sleep(1)
-            if i % 10 == 0:
-                self.log(f"  等待... ({i}秒)")
+            if i % 5 == 0:
+                self.log(f"  等待跳转... ({i}/{wait}秒)")
         
         self.log("重定向超时", "ERROR")
         return False

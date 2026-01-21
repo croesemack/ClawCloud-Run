@@ -485,6 +485,8 @@ class AutoLogin:
         从 URL 中检测区域信息
         例如: https://ap-southeast-1.console.claw.cloud/... -> ap-southeast-1
         """
+        if 'github.com' in url:
+            return None
         try:
             parsed = urlparse(url)
             host = parsed.netloc  # 如 "ap-southeast-1.console.claw.cloud"
@@ -836,55 +838,76 @@ class AutoLogin:
     
     def wait_redirect(self, page, wait=60):
         """
-        等待重定向（稳定版）
-        修正了 URL 拼接错误，增加了对 callback 回调过程的保护
+        等待重定向（最终修正版）
+        修正了误判 GitHub 为成功的问题，增加了迷路时的强制纠偏
         """
-        self.log("等待重定向(稳定版)...", "STEP")
+        self.log("等待重定向(智能纠偏)...", "STEP")
         
         for i in range(wait):
-            # 1. 获取当前状态
-            try:
-                url = page.url
-                # 检查是否成功登录（出现 Apps 链接或头像）
-                if page.locator('a[href*="/apps"], button[aria-label="Account"], .avatar').first.is_visible(timeout=500):
-                    self.log("检测到登录成功元素！", "SUCCESS")
-                    self.detect_region(url)
-                    return True
-                
-                # 如果 URL 已经是内部页面（包含 /apps），也算成功
-                if '/apps' in url:
-                    self.log("检测到内部 URL！", "SUCCESS")
-                    self.detect_region(url)
-                    return True
-            except:
-                pass
+            current_url = page.url
+            
+            # ==================================================
+            # 1. 成功判定：必须同时满足“有特征元素”+“域名正确”
+            # ==================================================
+            if 'claw.cloud' in current_url and 'signin' not in current_url.lower():
+                # 再次确认不是在回调过程中
+                if 'callback' not in current_url:
+                    # 检查是否有内部元素
+                    try:
+                        if page.locator('a[href*="/apps"], button[aria-label="Account"], .avatar').first.is_visible(timeout=500):
+                            self.log("重定向成功！(域名+元素双重确认)", "SUCCESS")
+                            self.detect_region(current_url)
+                            return True
+                        
+                        # 如果 URL 已经是 /apps，直接放行
+                        if '/apps' in current_url:
+                            self.log("重定向成功！(路径确认)", "SUCCESS")
+                            self.detect_region(current_url)
+                            return True
+                    except:
+                        pass
 
-            # 2. 关键修正：检测是否处于 callback 回调处理中
-            # 如果 URL 里有 callback，说明 GitHub 正在把 code 传给 ClawCloud
-            # 此时【千万不能】去点 GitHub 按钮，否则会打断握手
-            if 'callback' in page.url:
-                if i % 2 == 0:
-                    self.log(f"正在处理回调(callback)... 请耐心等待 ({i})", "INFO")
-                time.sleep(1)
-                continue # 跳过本次循环，不做任何点击操作
+            # ==================================================
+            # 2. 纠偏逻辑：如果卡在 GitHub 页面（如 Marketplace）
+            # ==================================================
+            if 'github.com' in current_url and 'login' not in current_url and 'oauth' not in current_url:
+                # 如果不是登录页也不是授权页，但还在 github.com，说明迷路了
+                if i > 5 and i % 10 == 0:
+                    self.log(f"检测到卡在 GitHub 页面 ({current_url})，强制跳回 ClawCloud...", "WARN")
+                    # 强制访问 ClawCloud 入口，触发重新跳转
+                    try:
+                        page.goto("https://console.run.claw.cloud/apps", timeout=10000)
+                    except:
+                        pass
+                    continue
 
-            # 3. 检测是否在 OAuth 授权页
-            if 'github.com/login/oauth/authorize' in page.url:
+            # ==================================================
+            # 3. 处理 OAuth 授权 / Sudo 密码
+            # ==================================================
+            if 'github.com/login/oauth/authorize' in current_url:
                 self.oauth(page)
-                time.sleep(2)
-                continue
+            
+            if 'github.com/sessions/sudo' in current_url:
+                try:
+                    self.log("输入 Sudo 密码...", "WARN")
+                    page.locator('input[type="password"]').fill(self.password)
+                    page.locator('button[type="submit"]').click()
+                    time.sleep(3)
+                except:
+                    pass
 
-            # 4. 只有在明确处于登录页时，才点击 GitHub 按钮
-            # 查找登录按钮
+            # ==================================================
+            # 4. 处理 ClawCloud 登录页的回弹
+            # ==================================================
+            # 只有在明确处于 ClawCloud 登录页时，才点击 GitHub 按钮
             try:
-                login_btn = page.locator('button:has-text("GitHub"), [data-provider="github"]').first
-                if login_btn.is_visible(timeout=500):
-                    # 只有当 i > 5 时才点击，给页面一点自动跳转的时间，防止刚加载就点
-                    if i > 5:
-                        self.log(f"检测到登录页，点击 GitHub 重试... ({i})", "WARN")
-                        login_btn.click(force=True)
-                        time.sleep(5) # 点完多睡一会
-                        page.wait_for_load_state('networkidle', timeout=5000)
+                if 'claw.cloud' in current_url and 'signin' in current_url:
+                    login_btn = page.locator('button:has-text("GitHub"), [data-provider="github"]').first
+                    if login_btn.is_visible(timeout=500):
+                        if i > 3: # 稍微给点缓冲
+                            self.log("检测到登录页，再次点击 GitHub...", "WARN")
+                            login_btn.click(force=True)
+                            time.sleep(5)
             except:
                 pass
 

@@ -835,50 +835,59 @@ class AutoLogin:
             page.wait_for_load_state('networkidle', timeout=30000)
     
     def wait_redirect(self, page, wait=60):
-        """等待重定向（智能版：支持回弹重试）"""
+        """
+        等待重定向（最终暴力版）
+        逻辑：只要页面上还有 "GitHub" 按钮，就说明没进去，继续点！
+        """
         self.log("等待重定向...", "STEP")
         
-        # 记录是否已经尝试过重试点击，避免死循环狂点
-        retried_click = False
-        
         for i in range(wait):
+            try:
+                # =================================================
+                # 核心修正：主动寻找页面上的 GitHub 登录按钮
+                # =================================================
+                # 查找常见的 GitHub 登录按钮元素
+                btn = page.locator('button:has-text("GitHub"), [data-provider="github"], a:has-text("GitHub")').first
+                
+                # 如果按钮存在且可见，说明还在登录页！
+                if btn.is_visible(timeout=500):
+                    # 只有在第 3 秒以后才开始重试（给它一点自动跳转的时间）
+                    if i > 3:
+                        self.log(f"检测到未登录（发现 GitHub 按钮），第 {i} 秒尝试点击...", "WARN")
+                        btn.click()
+                        # 点完等几秒让它反应
+                        time.sleep(4)
+                        page.wait_for_load_state('networkidle', timeout=5000)
+                        continue # 点完直接进入下一轮循环，重新判断
+            except:
+                pass
+
+            # 获取当前 URL
             url = page.url
             
-            # 1. 成功：进入了控制台 (URL包含 claw.cloud 且不包含 signin)
+            # 1. 成功判断（加强版）
+            # 必须包含 claw.cloud，且不能是 signin，且页面上不能有 GitHub 按钮（上面已经处理）
             if 'claw.cloud' in url and 'signin' not in url.lower():
-                self.log("重定向成功！", "SUCCESS")
-                self.detect_region(url)
-                return True
+                # 再做一个双重检查：确保不是首页 Landing Page
+                # 如果 URL 只是 https://xxx.claw.cloud/ 且页面标题包含 Welcome，那也是失败
+                title = page.title()
+                if "Welcome" in title and i < wait - 5:
+                    # 如果是 Welcome 页面，下一轮循环会被上面的按钮检测捕获并点击
+                    pass
+                else:
+                    self.log("重定向成功！(进入内部页面)", "SUCCESS")
+                    self.detect_region(url)
+                    return True
             
-            # 2. 特殊情况：卡在 OAuth 授权页 -> 点授权
+            # 2. 还在 OAuth 授权页
             if 'github.com/login/oauth/authorize' in url:
                 self.oauth(page)
-            
-            # 3. 【核心修复】特殊情况：验证完被踢回了登录页 (signin) -> 再点一次 GitHub
-            if 'signin' in url.lower() and 'claw.cloud' in url:
-                # 为了防止页面刚加载还没跳转就误判，我们只在第 5 秒后开始检测这个情况
-                if i > 5: 
-                    self.log("检测到回弹至登录页，尝试再次点击 GitHub...", "WARN")
-                    
-                    # 尝试点击 GitHub 按钮
-                    clicked = self.click(page, [
-                        '[data-provider="github"]',
-                        'button:has-text("GitHub")',
-                        'a:has-text("GitHub")'
-                    ], "再次点击 GitHub")
-                    
-                    if clicked:
-                        # 点完等几秒让它跳转，重置 i 不是好主意，直接 sleep
-                        time.sleep(5)
-                        page.wait_for_load_state('networkidle', timeout=10000)
-            
-            # 4. 特殊情况：Sudo Mode (再次输密码)
+
+            # 3. Sudo 密码确认页
             if 'github.com/sessions/sudo' in url:
-                self.log("检测到 Sudo 密码确认页", "WARN")
                 try:
                     page.locator('input[type="password"]').fill(self.password)
                     page.locator('button[type="submit"]').click()
-                    time.sleep(3)
                 except:
                     pass
 
@@ -886,7 +895,7 @@ class AutoLogin:
             if i % 5 == 0:
                 self.log(f"  等待跳转... ({i}/{wait}秒)")
         
-        self.log("重定向超时", "ERROR")
+        self.log("重定向超时 - 始终无法进入控制台", "ERROR")
         return False
     
     def keepalive(self, page):

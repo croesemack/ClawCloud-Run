@@ -828,13 +828,36 @@ class AutoLogin:
         return True
     
     def oauth(self, page):
-        """处理 OAuth"""
-        if 'github.com/login/oauth/authorize' in page.url:
-            self.log("处理 OAuth...", "STEP")
-            self.shot(page, "oauth")
-            self.click(page, ['button[name="authorize"]', 'button:has-text("Authorize")'], "授权")
-            time.sleep(3)
-            page.wait_for_load_state('networkidle', timeout=30000)
+        """处理 OAuth 授权（增强版）"""
+        # 检查 URL 或页面特征
+        if 'github.com/login/oauth/authorize' in page.url or 'Reauthorization required' in page.content():
+            self.log("检测到 OAuth 授权页面...", "WARN")
+            
+            # 尝试点击各种可能的授权按钮
+            # 截图里是 "Authorize ClawCloud"，我们把它加进去
+            auth_btns = [
+                'button:has-text("Authorize ClawCloud")',  # 针对你截图的按钮
+                'button[name="authorize"]',
+                'button:has-text("Authorize")',
+                'button:has-text("Re-authorize")',
+                '#js-oauth-authorize-btn'
+            ]
+            
+            for btn_sel in auth_btns:
+                try:
+                    btn = page.locator(btn_sel).first
+                    if btn.is_visible(timeout=1000):
+                        self.log(f"点击授权按钮: {btn_sel}", "SUCCESS")
+                        btn.click()
+                        time.sleep(3)
+                        # 点击后通常需要等待页面跳转
+                        try:
+                            page.wait_for_load_state('networkidle', timeout=10000)
+                        except:
+                            pass
+                        return # 点到一个就行了
+                except:
+                    pass
     
     def wait_redirect(self, page, wait=60):
         """
